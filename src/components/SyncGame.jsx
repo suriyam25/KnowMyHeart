@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import BrokenHeartEffect from "./BrokenHeartEffect";
 import FloatingHearts from "./FloatingHearts";
@@ -10,7 +10,7 @@ import {
   SYNC_REVEAL_DURATION,
 } from "../utils/constants";
 import { calculatePercentage, getResultBadge } from "../utils/helpers";
-import { updateSyncRoom } from "../utils/storage";
+import { advanceRound, submitAnswer } from "../services/heartSyncService";
 import { DEFAULT_SYNC_QUESTION_SET } from "../utils/syncQuestions";
 
 function hasSubmittedAnswer(answers, playerId) {
@@ -26,6 +26,8 @@ function getRoomQuestions(room) {
 }
 
 function SyncGame({ room, currentPlayerId, onRoomUpdate }) {
+  const [roundError, setRoundError] = useState("");
+  const [isSubmittingAnswer, setIsSubmittingAnswer] = useState(false);
   const questionSet = getRoomQuestions(room);
   const players = room.players;
   const currentPlayer = players.find((player) => player.id === currentPlayerId);
@@ -53,66 +55,11 @@ function SyncGame({ room, currentPlayerId, onRoomUpdate }) {
       : "";
   const totalRounds = questionSet.length;
 
-  if (!currentPlayer || !currentQuestion) {
-    return null;
-  }
-
-  const syncRoomUpdate = (updater) => {
-    const updatedRoom = updateSyncRoom(room.roomCode, updater);
-    if (updatedRoom) {
-      onRoomUpdate(updatedRoom);
-    }
-  };
-
   useEffect(() => {
-    if (
-      room.status !== "playing" ||
-      room.roundStatus !== "collecting" ||
-      !bothAnswered
-    ) {
-      return;
+    if (room.roundStatus !== "collecting") {
+      setIsSubmittingAnswer(false);
     }
-
-    const updatedRoom = updateSyncRoom(room.roomCode, (currentRoom) => {
-      if (
-        currentRoom.status !== "playing" ||
-        currentRoom.roundStatus !== "collecting"
-      ) {
-        return currentRoom;
-      }
-
-      const answers = currentRoom.answers ?? {};
-      const activePlayers = currentRoom.players ?? [];
-      const readyToReveal =
-        activePlayers.length === 2 &&
-        activePlayers.every((player) => hasSubmittedAnswer(answers, player.id));
-
-      if (!readyToReveal) {
-        return currentRoom;
-      }
-
-      const roundAnswerer = activePlayers[currentRoom.answererIndex] ?? activePlayers[0];
-      const roundGuesser =
-        activePlayers.find((player) => player.id !== roundAnswerer?.id) ??
-        activePlayers[1];
-      const match =
-        roundAnswerer && roundGuesser
-          ? answers[roundAnswerer.id] === answers[roundGuesser.id]
-          : false;
-
-      return {
-        ...currentRoom,
-        roundStatus: "revealed",
-        revealStartedAt: Date.now(),
-        lastRoundMatch: match,
-        matchCount: currentRoom.matchCount + (match ? 1 : 0),
-      };
-    });
-
-    if (updatedRoom) {
-      onRoomUpdate(updatedRoom);
-    }
-  }, [bothAnswered, onRoomUpdate, room]);
+  }, [room.roundStatus]);
 
   useEffect(() => {
     if (room.status !== "playing" || room.roundStatus !== "revealed") {
@@ -123,71 +70,37 @@ function SyncGame({ room, currentPlayerId, onRoomUpdate }) {
     const delay = Math.max(revealEndsAt - Date.now(), 0);
 
     const timeoutId = window.setTimeout(() => {
-      const updatedRoom = updateSyncRoom(room.roomCode, (currentRoom) => {
-        if (
-          currentRoom.status !== "playing" ||
-          currentRoom.roundStatus !== "revealed"
-        ) {
-          return currentRoom;
-        }
-
-        const isLastRound =
-          currentRoom.currentQuestionIndex >= getRoomQuestions(currentRoom).length - 1;
-
-        if (isLastRound) {
-          return {
-            ...currentRoom,
-            status: "finished",
-            finishedAt: new Date().toISOString(),
-          };
-        }
-
-        return {
-          ...currentRoom,
-          currentQuestionIndex: currentRoom.currentQuestionIndex + 1,
-          currentRound: currentRoom.currentRound + 1,
-          answererIndex: currentRoom.answererIndex === 0 ? 1 : 0,
-          answers: {},
-          roundStatus: "collecting",
-          revealStartedAt: null,
-          lastRoundMatch: null,
-        };
-      });
-
-      if (updatedRoom) {
-        onRoomUpdate(updatedRoom);
-      }
+      advanceRound(room.roomCode)
+        .then((updatedRoom) => {
+          onRoomUpdate?.(updatedRoom);
+        })
+        .catch((error) => {
+          setRoundError(error.message);
+        });
     }, delay);
 
     return () => window.clearTimeout(timeoutId);
   }, [onRoomUpdate, room]);
 
-  const handleAnswer = (optionIndex) => {
+  if (!currentPlayer || !currentQuestion) {
+    return null;
+  }
+
+  const handleAnswer = async (optionIndex) => {
     if (room.status !== "playing" || room.roundStatus !== "collecting") {
       return;
     }
 
-    syncRoomUpdate((currentRoom) => {
-      if (
-        currentRoom.status !== "playing" ||
-        currentRoom.roundStatus !== "collecting"
-      ) {
-        return currentRoom;
-      }
-
-      const answers = currentRoom.answers ?? {};
-      if (hasSubmittedAnswer(answers, currentPlayerId)) {
-        return currentRoom;
-      }
-
-      return {
-        ...currentRoom,
-        answers: {
-          ...answers,
-          [currentPlayerId]: optionIndex,
-        },
-      };
-    });
+    try {
+      setRoundError("");
+      setIsSubmittingAnswer(true);
+      const updatedRoom = await submitAnswer(room.roomCode, currentPlayerId, optionIndex);
+      onRoomUpdate?.(updatedRoom);
+    } catch (error) {
+      setRoundError(error.message);
+    } finally {
+      setIsSubmittingAnswer(false);
+    }
   };
 
   if (room.status === "finished") {
@@ -275,7 +188,7 @@ function SyncGame({ room, currentPlayerId, onRoomUpdate }) {
       </div>
 
       <SyncQuestionCard
-        disabled={currentPlayerAnswer !== null || isRevealOpen}
+        disabled={currentPlayerAnswer !== null || isRevealOpen || isSubmittingAnswer}
         matchCount={room.matchCount}
         onAnswer={handleAnswer}
         prompt={
@@ -296,6 +209,7 @@ function SyncGame({ room, currentPlayerId, onRoomUpdate }) {
         isMatch={isMatch}
         isOpen={isRevealOpen}
       />
+      {roundError ? <p className="form-error">{roundError}</p> : null}
     </section>
   );
 }

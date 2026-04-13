@@ -4,7 +4,6 @@ import {
   LATEST_RESULT_STORAGE_KEY,
   QUIZZES_STORAGE_KEY,
   SYNC_PLAYER_SESSION_KEY_PREFIX,
-  SYNC_ROOMS_STORAGE_KEY,
 } from "./constants";
 
 function canUseStorage(storageType = "localStorage") {
@@ -96,45 +95,6 @@ export function clearActivePlayState() {
   window.sessionStorage.removeItem(ACTIVE_PLAY_STORAGE_KEY);
 }
 
-export function getSyncRooms() {
-  return readJson("localStorage", SYNC_ROOMS_STORAGE_KEY, []);
-}
-
-export function getSyncRoomByCode(roomCode) {
-  return getSyncRooms().find((room) => room.roomCode === roomCode) ?? null;
-}
-
-export function saveSyncRoom(room) {
-  const rooms = getSyncRooms().filter((currentRoom) => currentRoom.roomCode !== room.roomCode);
-  const updatedRooms = [room, ...rooms];
-  writeJson("localStorage", SYNC_ROOMS_STORAGE_KEY, updatedRooms);
-  return room;
-}
-
-export function updateSyncRoom(roomCode, updater) {
-  const rooms = getSyncRooms();
-  const roomIndex = rooms.findIndex((room) => room.roomCode === roomCode);
-
-  if (roomIndex === -1) {
-    return null;
-  }
-
-  const currentRoom = rooms[roomIndex];
-  const updatedRoom = updater(currentRoom);
-
-  if (!updatedRoom) {
-    return currentRoom;
-  }
-
-  rooms[roomIndex] = updatedRoom;
-  writeJson("localStorage", SYNC_ROOMS_STORAGE_KEY, rooms);
-  return updatedRoom;
-}
-
-export function syncRoomCodeExists(roomCode) {
-  return getSyncRooms().some((room) => room.roomCode === roomCode);
-}
-
 export function getSyncPlayerSession(roomCode) {
   return readJson(
     "sessionStorage",
@@ -149,4 +109,12 @@ export function saveSyncPlayerSession(roomCode, session) {
     `${SYNC_PLAYER_SESSION_KEY_PREFIX}-${roomCode}`,
     session
   );
+}
+
+export function clearSyncPlayerSession(roomCode) {
+  if (!canUseStorage("sessionStorage")) {
+    return;
+  }
+
+  window.sessionStorage.removeItem(`${SYNC_PLAYER_SESSION_KEY_PREFIX}-${roomCode}`);
 }

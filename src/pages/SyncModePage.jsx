@@ -3,27 +3,19 @@ import { useNavigate, useParams } from "react-router-dom";
 import PageShell from "../components/PageShell";
 import SyncGame from "../components/SyncGame";
 import SyncLobby from "../components/SyncLobby";
+import { normalizeRoomCode } from "../utils/helpers";
+import { createSyncQuestionSet, SYNC_QUESTION_BANK } from "../utils/syncQuestions";
 import {
-  SYNC_POLL_INTERVAL,
-} from "../utils/constants";
-import {
-  generateHeartCode,
-  generateId,
-  normalizeRoomCode,
-} from "../utils/helpers";
-import {
-  createSyncQuestionSet,
-  DEFAULT_SYNC_QUESTION_SET,
-  SYNC_QUESTION_BANK,
-} from "../utils/syncQuestions";
-import {
+  clearSyncPlayerSession,
   getSyncPlayerSession,
-  getSyncRoomByCode,
   saveSyncPlayerSession,
-  saveSyncRoom,
-  syncRoomCodeExists,
-  updateSyncRoom,
 } from "../utils/storage";
+import {
+  createRoom,
+  joinRoom,
+  startRoom,
+  subscribeToRoom,
+} from "../services/heartSyncService";
 
 function SyncModePage() {
   const navigate = useNavigate();
@@ -32,82 +24,68 @@ function SyncModePage() {
     () => normalizeRoomCode(routeRoomCode ?? ""),
     [routeRoomCode]
   );
+
   const [playerName, setPlayerName] = useState("");
   const [joinCode, setJoinCode] = useState(normalizedRouteCode);
   const [errorMessage, setErrorMessage] = useState("");
-  const [room, setRoom] = useState(() =>
-    normalizedRouteCode ? getSyncRoomByCode(normalizedRouteCode) : null
-  );
+  const [room, setRoom] = useState(null);
   const [playerSession, setPlayerSession] = useState(() =>
     normalizedRouteCode ? getSyncPlayerSession(normalizedRouteCode) : null
   );
+  const [isCheckingRoom, setIsCheckingRoom] = useState(Boolean(normalizedRouteCode));
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [pendingAction, setPendingAction] = useState("");
 
   useEffect(() => {
     setJoinCode(normalizedRouteCode);
+    setErrorMessage("");
 
     if (!normalizedRouteCode) {
       setRoom(null);
       setPlayerSession(null);
-      setErrorMessage("");
+      setIsCheckingRoom(false);
       return;
     }
 
-    const nextRoom = getSyncRoomByCode(normalizedRouteCode);
-    const nextSession = getSyncPlayerSession(normalizedRouteCode);
-
-    setRoom(nextRoom);
-    setPlayerSession(nextSession);
-    if (nextSession?.name) {
-      setPlayerName(nextSession.name);
+    const savedSession = getSyncPlayerSession(normalizedRouteCode);
+    setPlayerSession(savedSession);
+    if (savedSession?.name) {
+      setPlayerName((currentValue) => currentValue || savedSession.name);
     }
 
-    setErrorMessage(
-      nextRoom ? "" : "That Heart Sync room could not be found. Check the code or create a new one."
-    );
-  }, [normalizedRouteCode]);
+    setIsCheckingRoom(true);
 
-  useEffect(() => {
-    if (!room || (Array.isArray(room.questions) && room.questions.length > 0)) {
-      return;
-    }
+    try {
+      const unsubscribe = subscribeToRoom(
+        normalizedRouteCode,
+        (nextRoom) => {
+          setRoom(nextRoom);
+          setIsCheckingRoom(false);
 
-    const updatedRoom = updateSyncRoom(room.roomCode, (currentRoom) => ({
-      ...currentRoom,
-      questions: DEFAULT_SYNC_QUESTION_SET,
-    }));
+          if (!nextRoom) {
+            setErrorMessage("That Heart Sync room could not be found. Check the code or create a new one.");
+            clearSyncPlayerSession(normalizedRouteCode);
+            return;
+          }
 
-    if (updatedRoom) {
-      setRoom(updatedRoom);
-    }
-  }, [room]);
+          setErrorMessage("");
+        },
+        (error) => {
+          setRoom(null);
+          setIsCheckingRoom(false);
+          setErrorMessage(error.message || "Unable to load the Heart Sync room right now.");
+        }
+      );
 
-  useEffect(() => {
-    if (!normalizedRouteCode) {
+      return () => {
+        unsubscribe();
+      };
+    } catch (error) {
+      setRoom(null);
+      setIsCheckingRoom(false);
+      setErrorMessage(error.message || "Unable to connect to Firebase right now.");
       return undefined;
     }
-
-    const syncRoomState = () => {
-      const latestRoom = getSyncRoomByCode(normalizedRouteCode);
-      const latestSession = getSyncPlayerSession(normalizedRouteCode);
-
-      setRoom(latestRoom);
-      setPlayerSession(latestSession);
-
-      if (latestSession?.name) {
-        setPlayerName((currentValue) => currentValue || latestSession.name);
-      }
-
-      if (!latestRoom) {
-        setErrorMessage(
-          "That Heart Sync room could not be found. Check the code or create a new one."
-        );
-      }
-    };
-
-    syncRoomState();
-    const intervalId = window.setInterval(syncRoomState, SYNC_POLL_INTERVAL);
-
-    return () => window.clearInterval(intervalId);
   }, [normalizedRouteCode]);
 
   const currentPlayer = useMemo(() => {
@@ -118,134 +96,90 @@ function SyncModePage() {
     return room.players.find((player) => player.id === playerSession.playerId) ?? null;
   }, [room, playerSession]);
 
-  const handleCreateRoom = () => {
+  const canJoinExistingRoom = Boolean(room && room.status === "waiting" && room.players.length < 2);
+
+  const handleCreateRoom = async () => {
     const trimmedName = playerName.trim();
     if (!trimmedName) {
       setErrorMessage("Enter your name before creating a Heart Sync room.");
       return;
     }
 
-    let roomCode = generateHeartCode();
-    while (syncRoomCodeExists(roomCode)) {
-      roomCode = generateHeartCode();
+    try {
+      setIsSubmitting(true);
+      setPendingAction("create");
+      setErrorMessage("");
+      const { room: createdRoom, session } = await createRoom({
+        playerName: trimmedName,
+        questions: createSyncQuestionSet(10),
+      });
+
+      saveSyncPlayerSession(createdRoom.roomCode, session);
+      setPlayerSession(session);
+      setRoom(createdRoom);
+      navigate(`/sync/${createdRoom.roomCode}`);
+    } catch (error) {
+      setErrorMessage(error.message || "Unable to create the Heart Sync room.");
+    } finally {
+      setIsSubmitting(false);
+      setPendingAction("");
     }
-
-    const firstPlayer = {
-      id: generateId("sync-player"),
-      name: trimmedName,
-      joinedAt: new Date().toISOString(),
-    };
-
-    const nextRoom = {
-      id: generateId("sync-room"),
-      roomCode,
-      players: [firstPlayer],
-      questions: createSyncQuestionSet(10),
-      currentRound: 1,
-      currentQuestionIndex: 0,
-      answererIndex: 0,
-      answers: {},
-      matchCount: 0,
-      status: "waiting",
-      roundStatus: "collecting",
-      revealStartedAt: null,
-      lastRoundMatch: null,
-      createdAt: new Date().toISOString(),
-    };
-
-    saveSyncRoom(nextRoom);
-    saveSyncPlayerSession(roomCode, {
-      playerId: firstPlayer.id,
-      name: firstPlayer.name,
-    });
-    navigate(`/sync/${roomCode}`);
   };
 
-  const handleJoinRoom = () => {
+  const handleJoinRoom = async () => {
     const normalizedCode = normalizeRoomCode(joinCode);
+    const trimmedName = playerName.trim();
+
     if (!normalizedCode) {
       setErrorMessage("Enter a Heart Code to join a room.");
       return;
     }
 
-    const existingRoom = getSyncRoomByCode(normalizedCode);
-    if (!existingRoom) {
-      setErrorMessage("That Heart Sync room could not be found. Check the code and try again.");
-      return;
-    }
-
-    const savedSession = getSyncPlayerSession(normalizedCode);
-    if (
-      savedSession &&
-      existingRoom.players.some((player) => player.id === savedSession.playerId)
-    ) {
-      setErrorMessage("");
-      navigate(`/sync/${normalizedCode}`);
-      return;
-    }
-
-    if (existingRoom.players.length >= 2) {
-      setErrorMessage("This Heart Sync room is already full.");
-      return;
-    }
-
-    if (existingRoom.status !== "waiting") {
-      setErrorMessage("This Heart Sync game has already started.");
-      return;
-    }
-
-    const trimmedName = playerName.trim();
     if (!trimmedName) {
       setErrorMessage("Enter your name before joining the room.");
       return;
     }
 
-    const secondPlayer = {
-      id: generateId("sync-player"),
-      name: trimmedName,
-      joinedAt: new Date().toISOString(),
-    };
+    try {
+      setIsSubmitting(true);
+      setPendingAction("join");
+      setErrorMessage("");
 
-    const updatedRoom = {
-      ...existingRoom,
-      players: [...existingRoom.players, secondPlayer],
-    };
+      const existingSession = getSyncPlayerSession(normalizedCode);
+      const { room: joinedRoom, session } = await joinRoom({
+        roomCode: normalizedCode,
+        playerName: trimmedName,
+        existingSession,
+      });
 
-    saveSyncRoom(updatedRoom);
-    saveSyncPlayerSession(normalizedCode, {
-      playerId: secondPlayer.id,
-      name: secondPlayer.name,
-    });
-    setErrorMessage("");
-    navigate(`/sync/${normalizedCode}`);
+      saveSyncPlayerSession(normalizedCode, session);
+      setPlayerSession(session);
+      setRoom(joinedRoom);
+      navigate(`/sync/${normalizedCode}`);
+    } catch (error) {
+      setErrorMessage(error.message || "Unable to join the Heart Sync room.");
+    } finally {
+      setIsSubmitting(false);
+      setPendingAction("");
+    }
   };
 
-  const handleStartGame = () => {
+  const handleStartGame = async () => {
     if (!room) {
       return;
     }
 
-    const updatedRoom = updateSyncRoom(room.roomCode, (currentRoom) => {
-      if (currentRoom.status !== "waiting" || currentRoom.players.length !== 2) {
-        return currentRoom;
-      }
-
-      return {
-        ...currentRoom,
-        status: "playing",
-        currentRound: 1,
-        currentQuestionIndex: 0,
-        answererIndex: 0,
-        answers: {},
-        matchCount: 0,
-        roundStatus: "collecting",
-        revealStartedAt: null,
-        lastRoundMatch: null,
-      };
-    });
-
-    if (updatedRoom) {
+    try {
+      setIsSubmitting(true);
+      setPendingAction("start");
+      setErrorMessage("");
+      const updatedRoom = await startRoom(room.roomCode);
       setRoom(updatedRoom);
+    } catch (error) {
+      setErrorMessage(error.message || "Unable to start the Heart Sync game.");
+    } finally {
+      setIsSubmitting(false);
+      setPendingAction("");
     }
   };
 
@@ -256,11 +190,30 @@ function SyncModePage() {
   const shouldShowLobby = Boolean(room && currentPlayer && room.status === "waiting");
   const shouldShowGame = Boolean(room && currentPlayer && room.status !== "waiting");
 
+  if (normalizedRouteCode && isCheckingRoom) {
+    return (
+      <PageShell className="sync-page">
+        <div className="container">
+          <section className="empty-state glass-panel">
+            <span className="eyebrow">Connecting</span>
+            <h1>Checking your Heart Sync room...</h1>
+            <p>Loading live room details from Firebase Realtime Database.</p>
+          </section>
+        </div>
+      </PageShell>
+    );
+  }
+
   return (
     <PageShell className="sync-page">
       <div className="container">
         {shouldShowLobby ? (
-          <SyncLobby currentPlayerId={currentPlayer.id} onStart={handleStartGame} room={room} />
+          <SyncLobby
+            currentPlayerId={currentPlayer.id}
+            isStarting={isSubmitting && pendingAction === "start"}
+            onStart={handleStartGame}
+            room={room}
+          />
         ) : null}
 
         {shouldShowGame ? (
@@ -285,11 +238,21 @@ function SyncModePage() {
               </p>
 
               <div className="hero-actions">
-                <button className="button button--primary" onClick={handleCreateRoom} type="button">
-                  Create Room
+                <button
+                  className="button button--primary"
+                  disabled={isSubmitting}
+                  onClick={handleCreateRoom}
+                  type="button"
+                >
+                  {isSubmitting && pendingAction === "create" ? "Creating..." : "Create Room"}
                 </button>
-                <button className="button button--ghost" onClick={handleJoinRoom} type="button">
-                  Join Room
+                <button
+                  className="button button--ghost"
+                  disabled={isSubmitting}
+                  onClick={handleJoinRoom}
+                  type="button"
+                >
+                  {isSubmitting && pendingAction === "join" ? "Joining..." : "Join Room"}
                 </button>
               </div>
             </div>
@@ -323,8 +286,23 @@ function SyncModePage() {
                     value={joinCode}
                   />
                 </label>
-                <button className="button button--ghost" onClick={handleJoinRoom} type="button">
-                  Join Existing Room
+                {normalizedRouteCode && room ? (
+                  <p className="sync-entry__note">
+                    Room {room.roomCode} is live. Enter your name to join from this device.
+                  </p>
+                ) : null}
+                {normalizedRouteCode && room && !canJoinExistingRoom && !currentPlayer ? (
+                  <p className="sync-entry__note">
+                    This room already has two players or the game has started.
+                  </p>
+                ) : null}
+                <button
+                  className="button button--ghost"
+                  disabled={isSubmitting || (normalizedRouteCode ? !room || !canJoinExistingRoom : false)}
+                  onClick={handleJoinRoom}
+                  type="button"
+                >
+                  {isSubmitting && pendingAction === "join" ? "Joining..." : "Join Existing Room"}
                 </button>
               </article>
             </div>

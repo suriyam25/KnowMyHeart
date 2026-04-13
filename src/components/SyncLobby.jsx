@@ -1,7 +1,7 @@
 import RoomCard from "./RoomCard";
 import PlayerStatus from "./PlayerStatus";
 
-function SyncLobby({ room, currentPlayerId, onStart }) {
+function SyncLobby({ room, currentPlayerId, isStarting = false, onStart }) {
   const bothJoined = room.players.length === 2;
   const isReady = bothJoined && room.status === "waiting";
 
@@ -22,8 +22,13 @@ function SyncLobby({ room, currentPlayerId, onStart }) {
 
           <div className="sync-lobby__actions">
             {isReady ? (
-              <button className="button button--primary" onClick={onStart} type="button">
-                Start Game
+              <button
+                className="button button--primary"
+                disabled={isStarting}
+                onClick={onStart}
+                type="button"
+              >
+                {isStarting ? "Starting..." : "Start Game"}
               </button>
             ) : (
               <div className="sync-waiting-state">

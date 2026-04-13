@@ -1,0 +1,11 @@
+{
+  "rules": {
+    "rooms": {
+      "$roomCode": {
+        ".read": true,
+        ".write": "$roomCode.matches(/^KMH[0-9]{4}$/)",
+        ".validate": "newData.hasChildren(['roomCode', 'createdAt', 'status', 'players']) && newData.child('roomCode').val() === $roomCode && newData.child('players').isList() && newData.child('players').childrenCount() <= 2 && newData.child('status').val().matches(/^(waiting|playing|finished)$/)"
+      }
+    }
+  }
+}
