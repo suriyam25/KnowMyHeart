@@ -3,6 +3,11 @@ import { useNavigate, useParams } from "react-router-dom";
 import PageShell from "../components/PageShell";
 import SyncGame from "../components/SyncGame";
 import SyncLobby from "../components/SyncLobby";
+import {
+  firebaseConfigErrorMessage,
+  firebaseEnvDebugSnapshot,
+  isFirebaseConfigured,
+} from "../lib/firebase";
 import { normalizeRoomCode } from "../utils/helpers";
 import { createSyncQuestionSet, SYNC_QUESTION_BANK } from "../utils/syncQuestions";
 import {
@@ -189,6 +194,37 @@ function SyncModePage() {
 
   const shouldShowLobby = Boolean(room && currentPlayer && room.status === "waiting");
   const shouldShowGame = Boolean(room && currentPlayer && room.status !== "waiting");
+
+  if (!isFirebaseConfigured) {
+    return (
+      <PageShell className="sync-page">
+        <div className="container">
+          <section className="empty-state glass-panel">
+            <span className="eyebrow">Firebase setup required</span>
+            <h1>Heart Sync needs Firebase configuration</h1>
+            <p>{firebaseConfigErrorMessage}</p>
+            <p>
+              Local setup: create a root <code>.env</code> file from <code>.env.example</code>,
+              add all <code>VITE_FIREBASE_*</code> values, keep it beside <code>package.json</code>,
+              and restart <code>npm run dev</code>.
+            </p>
+            <p>
+              Vercel setup: add the same variables in Project Settings -&gt; Environment Variables,
+              redeploy, and reload this page.
+            </p>
+            <p>
+              Do not place the file inside <code>src/</code> and do not name it <code>.env.txt</code>.
+            </p>
+            <p className="sync-entry__note">
+              Env debug: {Object.entries(firebaseEnvDebugSnapshot.firebaseEnvLoaded)
+                .map(([envKey, loaded]) => `${envKey}=${loaded ? "loaded" : "missing"}`)
+                .join(" | ")}
+            </p>
+          </section>
+        </div>
+      </PageShell>
+    );
+  }
 
   if (normalizedRouteCode && isCheckingRoom) {
     return (
